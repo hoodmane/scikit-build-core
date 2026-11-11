@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
     from packaging.version import Version
 
+    from ..builder.cross import CrossBuild
     from ..cmake import CMake
     from ..settings.skbuild_model import ScikitBuildSettings
 
@@ -99,8 +100,13 @@ def get_targetlib(settings: ScikitBuildSettings) -> TargetLib:
     return "platlib" if settings.wheel.platlib else "purelib"
 
 
-def get_wheel_tag(settings: ScikitBuildSettings, *, targetlib: TargetLib) -> WheelTag:
-    """Compute the best wheel tag for the current environment."""
+def get_wheel_tag(
+    settings: ScikitBuildSettings,
+    *,
+    targetlib: TargetLib,
+    cross: CrossBuild | None = None,
+) -> WheelTag:
+    """Compute the best wheel tag for the current environment (or the cross build host)."""
     # Builder applies the env table to the CMake environment, so the tag must be
     # computed against the same environment or it can describe a different
     # platform than the one that was built (e.g. ARCHFLAGS, #1541).
@@ -116,6 +122,7 @@ def get_wheel_tag(settings: ScikitBuildSettings, *, targetlib: TargetLib) -> Whe
         cmake_defines=settings.cmake.define,
         cmake_args=cmake_args,
         env=env,
+        cross=cross,
     )
 
 
@@ -272,6 +279,7 @@ def configure_wheel(
     raw_version: str | None = None,
     extra_cache_entries: Mapping[str, str | Path] | None = None,
     build_type: str | None = None,
+    cross: CrossBuild | None = None,
 ) -> Builder:
     """
     Configure the CMake project, returning the
@@ -330,6 +338,7 @@ def configure_wheel(
         name=name,
         version=version,
         raw_version=raw_version,
+        cross=cross,
     )
     return builder
 

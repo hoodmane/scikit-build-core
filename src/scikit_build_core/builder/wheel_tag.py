@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
     from .._compat.typing import Self
+    from .cross import CrossBuild
 
 __all__ = ["WheelTag"]
 
@@ -82,6 +83,7 @@ class WheelTag:
         cmake_defines: Mapping[str, str] | None = None,
         cmake_args: Sequence[str] = (),
         env: Mapping[str, str] | None = None,
+        cross: CrossBuild | None = None,
     ) -> Self:
         # The build environment, which the ``env`` settings table can change;
         # the tag must describe what CMake built, not the ambient environment.
@@ -95,20 +97,40 @@ class WheelTag:
                 msg = f"Unexpected build-tag, {build_tag!r} cannot contain dashes"
                 raise AssertionError(msg)
 
-        # manylinux sometimes comes before linux, but can't assume manylinux, use auditwheel instead
-        best_tag = next(
-            iter(
-                p
-                for p in packaging.tags.sys_tags()
-                if "manylinux" not in p.platform and "musllinux" not in p.platform
+        if cross is not None:
+            # Cross build: everything comes from the host build-details.json.
+            interp, abi, plats = (
+                cross.interpreter_tag,
+                cross.abi_tag,
+                [cross.platform_tag],
             )
-        )
-        interp, abi, *plats = (best_tag.interpreter, best_tag.abi, best_tag.platform)
+            is_cpython = cross.is_cpython
+            gil_disabled = cross.is_free_threaded
+            minor = cross.version_info[1]
+        else:
+            # manylinux sometimes comes before linux, but can't assume manylinux, use auditwheel instead
+            best_tag = next(
+                iter(
+                    p
+                    for p in packaging.tags.sys_tags()
+                    if "manylinux" not in p.platform and "musllinux" not in p.platform
+                )
+            )
+            interp, abi, *plats = (
+                best_tag.interpreter,
+                best_tag.abi,
+                best_tag.platform,
+            )
+            is_cpython = sys.implementation.name == "cpython"
+            gil_disabled = is_free_threaded()
+            minor = sys.version_info.minor
         pyvers = [interp]
 
         # Check for _PYTHON_HOST_PLATFORM environment variable to override platform
         host_platform = env.get("_PYTHON_HOST_PLATFORM")
-        if host_platform:
+        if cross is not None:
+            pass
+        elif host_platform:
             # Convert sysconfig platform format to wheel platform tag format
             plats = [host_platform.replace("-", "_").replace(".", "_")]
         elif sys.platform.startswith("win") and archs:
@@ -153,12 +175,16 @@ class WheelTag:
         if py_api:
             pyvers_new = py_api.split(".")
             pytags = [_PyTag(x) for x in pyvers_new]
-            gil_disabled = is_free_threaded()
             if all(t.is_classic_abi3 or t.is_ft_abi3 for t in pytags):
                 if root_is_purelib:
                     msg = f"Unexpected py-api, since platlib is set to false, must be Pythonless (e.g. py2.py3), not {py_api}"
                     raise AssertionError(msg)
-                stable = cls._stable_abi_tag(pytags, gil_disabled=gil_disabled)
+                stable = cls._stable_abi_tag(
+                    pytags,
+                    gil_disabled=gil_disabled,
+                    is_cpython=is_cpython,
+                    minor=minor,
+                )
                 if stable is not None:
                     pyvers, abis = stable
             elif all(x.startswith("py") and x[2:].isdecimal() for x in pyvers_new):
@@ -172,12 +198,19 @@ class WheelTag:
 
     @staticmethod
     def _stable_abi_tag(
-        pytags: list[_PyTag], *, gil_disabled: bool
+        pytags: list[_PyTag],
+        *,
+        gil_disabled: bool,
+        is_cpython: bool | None = None,
+        minor: int | None = None,
     ) -> tuple[list[str], list[str]] | None:
         """Resolve a Stable ABI py-api request to (pyvers, abis), or None to ignore."""
         classic_tags = [t for t in pytags if t.is_classic_abi3]
         ft_tags = [t for t in pytags if t.is_ft_abi3]
-        is_cpython = sys.implementation.name == "cpython"
+        if is_cpython is None:
+            is_cpython = sys.implementation.name == "cpython"
+        if minor is None:
+            minor = sys.version_info.minor
 
         if is_cpython and gil_disabled:
             # Free-threaded: only accept cp3XXt tags
@@ -187,7 +220,7 @@ class WheelTag:
                 )
                 return None
             target = ft_tags[0]
-            if target.minor > sys.version_info.minor:
+            if target.minor > minor:
                 logger.debug(
                     "Ignoring py-api, version (3.{}) is too high", target.minor
                 )
@@ -216,11 +249,10 @@ class WheelTag:
         # Classic CPython
         if classic_tags:
             target = classic_tags[0]
-            if is_cpython and target.minor <= sys.version_info.minor:
+            if is_cpython and target.minor <= minor:
                 return [str(target)], ["abi3"]
             logger.debug(
-                "Ignoring py-api, not a CPython interpreter ({}) or version (3.{}) is too high",
-                sys.implementation.name,
+                "Ignoring py-api, not a CPython interpreter or version (3.{}) is too high",
                 target.minor,
             )
             return None

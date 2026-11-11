@@ -14,12 +14,15 @@ from .._compat import tomllib
 TYPE_CHECKING = False
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from typing import Literal
+    from typing import Any, Literal
 
 __all__ = [
     "build_editable",
     "build_sdist",
     "build_wheel",
+    "cross_build_wheel",
+    "get_build_requires_for_cross_build_wheel",
+    "get_host_requires_for_cross_build_wheel",
     "get_requires_for_build_editable",
     "get_requires_for_build_sdist",
     "get_requires_for_build_wheel",
@@ -55,6 +58,41 @@ def build_wheel(
             config_settings,
             metadata_directory,
             editable=False,
+        ).wheel_filename
+
+
+def cross_build_wheel(
+    wheel_directory: str,
+    config_settings: dict[str, list[str] | str] | None = None,
+    metadata_directory: str | None = None,
+    build_details: dict[str, Any] | None = None,
+    host_requires_directory: str | None = None,
+    toolchain: dict[str, str] | None = None,
+) -> str:
+    """
+    Cross build a wheel for the host Python described by ``build_details``
+    (a parsed PEP 739 ``build-details.json``), with host requirements installed
+    in ``host_requires_directory`` and the compilers described by ``toolchain``.
+    """
+    from .._logging import rich_print
+    from ..builder.cross import CrossBuild
+    from .wheel import _build_wheel_impl
+
+    try:
+        cross = CrossBuild.from_hook_args(
+            build_details, host_requires_directory, toolchain
+        )
+    except ValueError as err:
+        rich_print("\n{bold}***", f"ERROR: {err}", color="red", file=sys.stderr)
+        raise SystemExit(1) from None
+
+    with _exit_on_failed_live_process():
+        return _build_wheel_impl(
+            wheel_directory,
+            config_settings,
+            metadata_directory,
+            editable=False,
+            cross=cross,
         ).wheel_filename
 
 
@@ -180,3 +218,21 @@ def get_requires_for_build_editable(
     config_settings: dict[str, str | list[str]] | None = None,
 ) -> list[str]:
     return _get_requires_for_build_wheel(config_settings, state="editable")
+
+
+def get_build_requires_for_cross_build_wheel(
+    config_settings: dict[str, str | list[str]] | None = None,
+    build_details: dict[str, Any] | None = None,  # noqa: ARG001
+) -> list[str]:
+    # CMake and Ninja run on the build machine regardless of the host, so the
+    # requirements are the same as for a native build.
+    return _get_requires_for_build_wheel(config_settings, state="wheel")
+
+
+def get_host_requires_for_cross_build_wheel(
+    config_settings: dict[str, str | list[str]] | None = None,  # noqa: ARG001
+    build_details: dict[str, Any] | None = None,  # noqa: ARG001
+) -> list[str]:
+    # scikit-build-core needs nothing installed for the host platform itself;
+    # projects declare their host requirements in [build-system] host-requires.
+    return []

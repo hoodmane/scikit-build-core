@@ -38,6 +38,7 @@ from .._compat.importlib import metadata
 from .._logging import logger, rich_warning
 from .._reproducible import get_reproducible_epoch
 from ..program_search import _macos_binary_is_x86
+from ..resources import cross as cross_resources
 from ..resources import find_python
 from .cmake_args import iter_cmake_defines
 from .generator import set_environment_for_gen
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 
     from ..cmake import CMaker
     from ..settings.skbuild_model import ScikitBuildSettings
+    from .cross import CrossBuild
 
 __all__ = [
     "Builder",
@@ -259,11 +261,21 @@ class Builder:
         raw_version: str | None = None,
         limited_api: bool | None = None,
         configure_args: Iterable[str] = (),
+        cross: CrossBuild | None = None,
     ) -> None:
         cmake_defines = {
             k: ("TRUE" if v else "FALSE") if isinstance(v, bool) else str(v)
             for k, v in defines.items()
         }
+
+        if cross is not None:
+            # Make the cross toolchain visible to CMake before the generator is
+            # resolved (which otherwise defaults CC/CXX from sysconfig).
+            cross.apply_environment(self.config.env)
+            # Host requirements (e.g. NumPy for the host) are searched first.
+            if cross.host_requires_directory is not None:
+                self.config.prefix_dirs.append(cross.host_requires_directory)
+                logger.debug("HOST_REQUIRES: {}", cross.host_requires_directory)
 
         # Add any extra CMake modules
         self.config.module_dirs.extend(
@@ -302,6 +314,13 @@ class Builder:
             self.config.module_dirs.append(fp_dir)
             logger.debug("FindPython backport activated at {}", fp_dir)
 
+        if cross is not None:
+            # Wrap FindPython so that the SOABI is filled in from the host
+            # build-details.json; see resources/cross/_FindPythonCross.cmake.
+            cross_dir = Path(cross_resources.__file__).parent.resolve()
+            self.config.module_dirs.insert(0, cross_dir)
+            logger.debug("FindPython cross wrapper activated at {}", cross_dir)
+
         current_gen = self.get_generator(*configure_args)
         local_def = set_environment_for_gen(
             current_gen,
@@ -329,19 +348,26 @@ class Builder:
             cache_config["SKBUILD_PROJECT_VERSION_FULL"] = raw_version or str(version)
 
         py_api = self.settings.wheel.py_api
-        gil_disabled = is_free_threaded()
+        if cross is not None:
+            gil_disabled = cross.is_free_threaded
+            is_cpython = cross.is_cpython
+            python_minor = cross.version_info[1]
+        else:
+            gil_disabled = is_free_threaded()
+            is_cpython = sys.implementation.name == "cpython"
+            python_minor = sys.version_info.minor
 
         sabi = _SabiMode.NONE
         sabi_minor: int | None = None
         if limited_api is True:
             # Handle externally-set limited_api (e.g. from setuptools)
-            if sys.implementation.name != "cpython":
+            if not is_cpython:
                 logger.info("PyPy doesn't support the Limited API, ignoring")
             elif gil_disabled:
                 # The free-threaded stable ABI (PEP 803 / abi3t) only exists on
                 # CPython 3.15+; older free-threaded builds have no abi3t, so a
                 # forced abi3t module would be unimportable. Downgrade instead.
-                if sys.version_info >= (3, 15):
+                if python_minor >= 15:
                     sabi = _SabiMode.ABI3T
                 else:
                     logger.info(
@@ -356,7 +382,7 @@ class Builder:
             parts = py_api.split(".")
             classic = next((p for p in parts if p[3:].isdigit()), None)
             ft = next((p for p in parts if p.endswith("t") and p[3:-1].isdigit()), None)
-            if sys.implementation.name != "cpython":
+            if not is_cpython:
                 logger.info("py-api {} requires CPython, ignoring", py_api)
             elif gil_disabled:
                 # Free-threaded stable ABI (PEP 803 / abi3t)
@@ -366,7 +392,7 @@ class Builder:
                     )
                 else:
                     target_minor_version = int(ft[3:-1])
-                    if target_minor_version <= sys.version_info.minor:
+                    if target_minor_version <= python_minor:
                         sabi = _SabiMode.ABI3T
                         sabi_minor = target_minor_version
                     else:
@@ -382,7 +408,7 @@ class Builder:
                 )
             else:
                 target_minor_version = int(classic[3:])
-                if target_minor_version <= sys.version_info.minor:
+                if target_minor_version <= python_minor:
                     sabi = _SabiMode.ABI3
                     sabi_minor = target_minor_version
 
@@ -397,7 +423,9 @@ class Builder:
                 "Python 3.13.4 on Windows is broken for building, 3.13.5 was rushed out to fix it. Use an older, newer, or free-threaded version instead."
             )
 
-        if self.settings.cmake.python_hints:
+        if cross is not None and self.settings.cmake.python_hints:
+            self._configure_cross_python_hints(cache_config, cross)
+        elif self.settings.cmake.python_hints:
             # Only computed when the hints are used; get_numpy_include_dir imports NumPy.
             python_library = get_python_library(self.config.env, abi3=False)
             python_sabi_library = None
@@ -444,11 +472,18 @@ class Builder:
                 if numpy_include_dir:
                     cache_config[f"{prefix}_NumPy_INCLUDE_DIR"] = numpy_include_dir
 
-        cache_config["SKBUILD_SOABI"] = get_soabi(
-            self.config.env,
-            abi3=(sabi == _SabiMode.ABI3),
-            abi3t=(sabi == _SabiMode.ABI3T),
-        )
+        if cross is not None:
+            cache_config["SKBUILD_SOABI"] = cross.soabi(
+                abi3=(sabi == _SabiMode.ABI3),
+                abi3t=(sabi == _SabiMode.ABI3T),
+            )
+            cache_config["SKBUILD_SOSABI"] = cross.sosabi()
+        else:
+            cache_config["SKBUILD_SOABI"] = get_soabi(
+                self.config.env,
+                abi3=(sabi == _SabiMode.ABI3),
+                abi3t=(sabi == _SabiMode.ABI3T),
+            )
 
         # Allow CMakeLists to detect this is supposed to be a limited ABI build
         cache_config["SKBUILD_SABI_COMPONENT"] = (
@@ -469,7 +504,15 @@ class Builder:
 
         self.config.init_cache(cache_config)
 
-        if sys.platform.startswith("darwin"):
+        toolchain_file = self.settings.cmake.toolchain_file
+        if cross is not None:
+            if toolchain_file is None and "CMAKE_TOOLCHAIN_FILE" not in self.config.env:
+                toolchain_file = cross.write_toolchain_file(self.config.build_dir)
+            else:
+                logger.info(
+                    "Cross build: using the user supplied CMake toolchain file instead of generating one"
+                )
+        elif sys.platform.startswith("darwin"):
             # Cross-compile support for macOS - respect ARCHFLAGS if set,
             # unless CMAKE_SYSTEM_PROCESSOR is in the cmake args (conda, #207)
             archs = get_archs(self.config.env, self.get_cmake_args())
@@ -493,8 +536,47 @@ class Builder:
         self.config.configure(
             defines=cmake_defines,
             cmake_args=[*self.get_cmake_args(), *configure_args],
-            toolchain=self.settings.cmake.toolchain_file,
+            toolchain=toolchain_file,
         )
+
+    def _configure_cross_python_hints(
+        self, cache_config: dict[str, str | Path | bool], cross: CrossBuild
+    ) -> None:
+        """
+        Python hints for a cross build. The interpreter is the build Python
+        (used to run scripts), while headers, libraries and the SOABI come from
+        the host Python described by build-details.json. With
+        ``CMAKE_CROSSCOMPILING`` set by the toolchain file, FindPython does not
+        query the interpreter for development artifacts; it looks for a
+        ``python3.X-config`` tool below ``Python_ROOT_DIR`` instead, so point
+        that at the host prefix.
+        """
+        include_dir = cross.include_dir
+        numpy_include_dir = cross.numpy_include_dir
+        libpython = cross.libpython
+
+        cache_config["PYTHON_EXECUTABLE"] = Path(sys.executable)
+        if include_dir is not None:
+            cache_config["PYTHON_INCLUDE_DIR"] = include_dir
+
+        for prefix in ("Python", "Python3"):
+            cache_config[f"{prefix}_EXECUTABLE"] = Path(sys.executable)
+            if cross.base_prefix:
+                cache_config[f"{prefix}_ROOT_DIR"] = Path(cross.base_prefix)
+            if include_dir is not None:
+                cache_config[f"{prefix}_INCLUDE_DIR"] = include_dir
+            cache_config[f"{prefix}_FIND_REGISTRY"] = "NEVER"
+            if cross.is_free_threaded and self.config.cmake.version >= Version("4.1.2"):
+                cache_config[f"{prefix}_FIND_ABI"] = "ANY;ANY;ANY;ON"
+            if cross.is_windows and libpython is not None:
+                cache_config[f"{prefix}_LIBRARY"] = libpython
+            if numpy_include_dir is not None:
+                cache_config[f"{prefix}_NumPy_INCLUDE_DIR"] = numpy_include_dir
+            elif cross.host_requires_directory is not None:
+                logger.debug(
+                    "NumPy not found in the host requirements directory; not setting {}_NumPy_INCLUDE_DIR",
+                    prefix,
+                )
 
     def build(
         self, build_args: Sequence[str], *, build_type: str | None = None

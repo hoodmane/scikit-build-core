@@ -88,6 +88,7 @@ TYPE_CHECKING = False
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from ..builder.cross import CrossBuild
     from ..settings.skbuild_model import ScikitBuildSettings
 
 __all__ = ["_build_wheel_impl"]
@@ -218,6 +219,7 @@ def _build_wheel_impl(
     *,
     exit_after_config: bool = False,
     editable: bool,
+    cross: CrossBuild | None = None,
 ) -> WheelImplReturn:
     """
     Build a wheel or just prepare metadata (if wheel dir is None). Can be editable.
@@ -271,6 +273,7 @@ def _build_wheel_impl(
             state=state,
             settings=settings_reader.settings,
             pyproject=pyproject,
+            cross=cross,
         )
     except FailedLiveProcessError as err:
         settings_reader = SettingsReader(
@@ -300,6 +303,7 @@ def _build_wheel_impl(
                 state=state,
                 settings=settings_reader.settings,
                 pyproject=pyproject,
+                cross=cross,
             )
         except FailedLiveProcessError as err2:
             err2.msg = settings_reader.settings.messages.after_failure
@@ -315,6 +319,7 @@ def _build_wheel_impl_impl(
     state: Literal["sdist", "wheel", "editable", "metadata_wheel", "metadata_editable"],
     settings: ScikitBuildSettings,
     pyproject: dict[str, Any],
+    cross: CrossBuild | None = None,
 ) -> WheelImplReturn:
     """
     Build a wheel or just prepare metadata (if wheel dir is None). Can be editable.
@@ -365,7 +370,7 @@ def _build_wheel_impl_impl(
         wheel_variant = get_wheel_variant(settings, pyproject, metadata)
 
         targetlib = get_targetlib(settings)
-        tags = get_wheel_tag(settings, targetlib=targetlib)
+        tags = get_wheel_tag(settings, targetlib=targetlib, cross=cross)
         build_dir = get_build_dir(
             settings,
             tags=tags,
@@ -538,6 +543,7 @@ def _build_wheel_impl_impl(
                 name=metadata.name,
                 version=metadata.version,
                 raw_version=metadata.raw_version,
+                cross=cross,
             )
             if exit_after_config:
                 return WheelImplReturn("", settings=settings)
