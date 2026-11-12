@@ -478,6 +478,7 @@ class Builder:
                 abi3t=(sabi == _SabiMode.ABI3T),
             )
             cache_config["SKBUILD_SOSABI"] = cross.sosabi()
+            cache_config["SKBUILD_CROSS_BUILD"] = "1"
         else:
             cache_config["SKBUILD_SOABI"] = get_soabi(
                 self.config.env,
