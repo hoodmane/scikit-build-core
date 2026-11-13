@@ -238,6 +238,29 @@ def test_cross_build_toolchain_file(tmp_path):
     assert path.read_text() == text
 
 
+def test_cross_build_toolchain_file_emscripten(tmp_path):
+    emcc = tmp_path / "emsdk" / "emcc"
+    emcc.parent.mkdir()
+    emcc.write_text("")
+    platform_file = (
+        tmp_path / "emsdk" / "cmake" / "Modules" / "Platform" / "Emscripten.cmake"
+    )
+    platform_file.parent.mkdir(parents=True)
+    platform_file.write_text("")
+    details = build_details(
+        "emscripten-5.0.3-wasm32",
+        multiarch="wasm32-emscripten",
+        extension_suffix=".cpython-314-wasm32-emscripten.so",
+    )
+    cross = CrossBuild.from_hook_args(details, None, {"CC": os.fspath(emcc)})
+    text = cross.toolchain_file_contents()
+    assert f'include("{platform_file}")' in text
+    assert f'set(SKBUILD_EMSCRIPTEN_TOOLCHAIN_FILE "{platform_file}")' in text
+    assert "list(PREPEND CMAKE_MODULE_PATH" in text
+    assert "set(CMAKE_SYSTEM_NAME Emscripten)" in text
+    assert "set(CMAKE_SYSTEM_PROCESSOR wasm32)" in text
+
+
 def test_wheel_tag_cross():
     cross = CrossBuild.from_hook_args(build_details(), None, None)
     tags = WheelTag.compute_best([], cross=cross)

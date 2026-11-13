@@ -207,6 +207,7 @@ def _sanitize_path(path: Any) -> list[Path]:
 class Builder:
     settings: ScikitBuildSettings
     config: CMaker
+    cross: CrossBuild | None = None
 
     def __post_init__(self) -> None:
         # Apply the user's env table before configure/build/install so it is
@@ -269,6 +270,7 @@ class Builder:
         }
 
         if cross is not None:
+            self.cross = cross
             # Make the cross toolchain visible to CMake before the generator is
             # resolved (which otherwise defaults CC/CXX from sysconfig).
             cross.apply_environment(self.config.env)
@@ -607,6 +609,11 @@ class Builder:
         targets = self.settings.install.targets
         strip = self.settings.install.strip
         assert strip is not None
+        if strip and self.cross is not None and self.cross.system_name == "Emscripten":
+            # Emscripten >= 5.0 strip removes the dylink.0 section that side
+            # modules need to load (emscripten-core/emscripten#26563).
+            logger.info("Not stripping Emscripten side modules at install time")
+            strip = False
         self.config.install(
             install_dir,
             strip=strip,
