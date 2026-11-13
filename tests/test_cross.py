@@ -145,6 +145,21 @@ def test_cross_build_properties(details, system, processor, tag):
     assert f"{cross.interpreter_tag}-{cross.abi_tag}-{cross.platform_tag}" == tag
 
 
+def test_cross_build_pyemscripten_tag():
+    details = build_details(
+        "emscripten-5.0.3-wasm32",
+        multiarch="wasm32-emscripten",
+        extension_suffix=".cpython-314-wasm32-emscripten.so",
+    )
+    cross = CrossBuild.from_hook_args(details, None, None)
+    assert cross.platform_tag == "emscripten_5_0_3_wasm32"
+    assert cross.system_name == "Emscripten"
+    assert cross.processor == "wasm32"
+    details["pyemscripten_platform_version"] = "2026_0"
+    cross = CrossBuild.from_hook_args(details, None, None)
+    assert cross.platform_tag == "pyemscripten_2026_0_wasm32"
+
+
 def test_cross_build_python_properties():
     cross = CrossBuild.from_hook_args(build_details(), None, None)
     assert cross.version_info == (3, 14)
